@@ -10,9 +10,9 @@ import segmentation_models_pytorch as smp
 from scipy.signal import find_peaks, correlate, medfilt
 from scipy.interpolate import interp1d
 
-IMAGE_PATH = "data/train_wyprostowane/ecg_train_0041.png"
+IMAGE_PATH = "data/train_ready_files/ecg_train_0041.png"
 REC_BASE = "data/train/ecg_train_0041"
-SCIEZKA_MODEL = "unet_best.pth"
+MODEL_PATHL = "unet_best.pth"
 
 MASK_WIDTH = 2200
 MASK_HEIGHT = 1700
@@ -63,15 +63,11 @@ def generate_mask(image_path, model):
 
 
 def clean_mask(mask):
-    """
-    Delikatny postprocessing — usuwa tylko małe izolowane plamy.
-    Nie rusza samego sygnału.
-    """
+
     binary = (mask > 127).astype(np.uint8)
 
-    # Tylko connected components — usuń małe izolowane plamy
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    min_area = 50  # bardzo małe plamy (tekst, kropki)
+    min_area = 50
 
     cleaned = np.zeros_like(binary)
     for i in range(1, num_labels):
@@ -96,44 +92,40 @@ def find_left_margin(maska):
 def smart_split_by_baselines(maska, num_rows=3, num_cols=4):
     h, w = maska.shape
 
-    profil_y = np.sum(maska > 127, axis=1)
-    piki, _ = find_peaks(profil_y, distance=h // 8, prominence=np.max(profil_y) * 0.05)
-    piki_sorted = sorted(piki)
+    profilee_y = np.sum(maska > 127, axis=1)
+    file, _ = find_peaks(profile_y, distance=h // 8, prominence=np.max(profile_y) * 0.05)
+    file_sorted = sorted(file)
 
-    if len(piki_sorted) >= num_rows + 1:
-        linie_bazowe = list(piki_sorted[:num_rows])
-        dolna_granica = (piki_sorted[num_rows - 1] + piki_sorted[num_rows]) // 2
-    elif len(piki_sorted) >= num_rows:
-        linie_bazowe = list(piki_sorted[:num_rows])
-        dolna_granica = h
+    if len(file_sorted) >= num_rows + 1:
+        base_line = list(file_sorted[:num_rows])
+        lower_boundary = (file_sorted[num_rows - 1] + file_sorted[num_rows]) // 2
+    elif len(file_sorted) >= num_rows:
+        base_line = list(file_sorted[:num_rows])
+        lower_boundary = h
     else:
-        linie_bazowe = list(piki_sorted)
-        dolna_granica = h
+        base_line = list(file_sorted)
+        lower_boundary = h
 
-    linie_ciecia = [0]
-    for i in range(len(linie_bazowe) - 1):
-        linie_ciecia.append((linie_bazowe[i] + linie_bazowe[i + 1]) // 2)
-    linie_ciecia.append(dolna_granica)
+    cutting_line = [0]
+    for i in range(len(base_line) - 1):
+        cutting_line.append((base_line[i] + base_line[i + 1]) // 2)
+    cutting_line.append(lower_boundary)
 
     margin_left = find_left_margin(maska)
 
     wycinki = []
-    for row in range(len(linie_ciecia) - 1):
+    for row in range(len(cutting_line) - 1):
         for col in range(num_cols):
             x_start = margin_left + col * COL_WIDTH_PX
             x_end = min(x_start + COL_WIDTH_PX, w)
-            wycinki.append(maska[linie_ciecia[row]:linie_ciecia[row + 1],
+            wycinki.append(maska[cutting_line[row]:cutting_line[row + 1],
                                  x_start:x_end])
 
-    return wycinki, linie_bazowe, linie_ciecia, margin_left, COL_WIDTH_PX
+    return wycinki, base_line, cutting_line, margin_left, COL_WIDTH_PX
 
 
 def digitize_crop(crop, baseline_row):
-    """
-    Outer edge: bierz krawędź DALSZĄ od baseline.
-    - mid < baseline → sygnał powyżej → bierz top (prawdziwa amplituda dodatnia)
-    - mid >= baseline → sygnał poniżej → bierz bot (prawdziwa amplituda ujemna)
-    """
+
     h, w = crop.shape
     binary = crop > 127
     col_counts = binary.sum(axis=0)
@@ -240,9 +232,9 @@ if __name__ == "__main__":
     record_name = os.path.basename(REC_BASE)
     out_dir = f"debug_{record_name}"
     os.makedirs(out_dir, exist_ok=True)
-    print(f"Rekord: {record_name}")
+    print(f"Record: {record_name}")
 
-    model = load_model(SCIEZKA_MODEL)
+    model = load_model(MODEL_PATH)
     mask = generate_mask(IMAGE_PATH, model)
     cv2.imwrite(f"{out_dir}/01_maska_raw.png", mask)
 
@@ -251,32 +243,32 @@ if __name__ == "__main__":
 
     record = wfdb.rdrecord(REC_BASE)
     rec_leads_upper = [n.upper() for n in record.sig_name]
-    print(f"Fs: {record.fs} Hz | Leads: {record.sig_name} | Próbki: {record.sig_len}")
+    print(f"Fs: {record.fs} Hz | Leads: {record.sig_name} | Samples: {record.sig_len}")
 
-    wycinki, linie_bazowe, linie_ciecia, margin_left, col_width_px = \
+    wycinki, base_line, cutting_line, margin_left, col_width_px = \
         smart_split_by_baselines(mask, num_rows=NUM_ROWS, num_cols=NUM_COLS)
 
-    print(f"Linie bazowe: {linie_bazowe}")
-    print(f"Linie cięcia: {linie_ciecia}")
-    print(f"Lewy margines: {margin_left}px")
-    print(f"Szerokość kolumny: {col_width_px}px (oczekiwane dla 2.5s)")
+    print(f"base lines: {base_line}")
+    print(f"cutting line: {cutting_line}")
+    print(f"left margin: {margin_left}px")
+    print(f"column width: {col_width_px}px (expected for 2.5s)")
 
-    # DIAGNOSTYKA
+
     print(f"\n{'='*75}")
-    print("DIAGNOSTYKA POZYCJI SYGNAŁU W WYCINKACH:")
+    print("DIAGNOSTICS OF SIGNAL POSITION IN SLICES:")
     print(f"{'='*75}")
-    for i, wycinek in enumerate(wycinki):
+    for i, segment in enumerate(wycinki):
         if i >= len(LEAD_NAMES_ORDERED):
             break
         lead_name = LEAD_NAMES_ORDERED[i]
         col = i % NUM_COLS
 
-        binary = wycinek > 127
+        binary = segment > 127
         col_counts = binary.sum(axis=0)
         has_signal = col_counts > 0
 
         if has_signal.sum() < 2:
-            print(f"  {lead_name:<6} — brak sygnału")
+            print(f"  {lead_name:<6} — no signal")
             continue
 
         signal_cols = np.where(has_signal)[0]
@@ -285,20 +277,19 @@ if __name__ == "__main__":
         signal_width = x_end - x_start + 1
 
         margin_l = x_start
-        margin_r = wycinek.shape[1] - x_end - 1
+        margin_r = segment.shape[1] - x_end - 1
         margin_l_ms = margin_l / PIXELS_PER_MM_X / PAPER_SPEED_MM_S * 1000
 
-        print(f"  {lead_name:<6} kol={col} | "
-              f"wycinek={wycinek.shape[1]}px | "
-              f"sygnał: {x_start}-{x_end} ({signal_width}px) | "
-              f"margines L={margin_l}px ({margin_l_ms:.0f}ms) R={margin_r}px")
+        print(f"  {lead_name:<6} col={col} | "
+              f"segment={segment.shape[1]}px | "
+              f"signal: {x_start}-{x_end} ({signal_width}px) | "
+              f"margin L={margin_l}px ({margin_l_ms:.0f}ms) R={margin_r}px")
 
-    # CIĘCIE — wizualizacja
     fig_cut, ax_cut = plt.subplots(figsize=(14, 9))
     ax_cut.imshow(mask, cmap="gray")
-    for b in linie_bazowe:
+    for b in base_line:
         ax_cut.axhline(y=b, color="red", linewidth=2, alpha=0.7)
-    for c in linie_ciecia:
+    for c in cutting_line:
         ax_cut.axhline(y=c, color="lime", linewidth=2, linestyle="--")
     for col in range(NUM_COLS + 1):
         x = margin_left + col * col_width_px
@@ -306,8 +297,8 @@ if __name__ == "__main__":
     for i, lead in enumerate(LEAD_NAMES_ORDERED):
         row = i // NUM_COLS
         col = i % NUM_COLS
-        if row < len(linie_ciecia) - 1:
-            y_mid = (linie_ciecia[row] + linie_ciecia[row + 1]) // 2
+        if row < len(cutting_line) - 1:
+            y_mid = (cutting_line[row] + cutting_line[row + 1]) // 2
             x_mid = margin_left + col * col_width_px + col_width_px // 2
             ax_cut.text(x_mid, y_mid, lead, color="yellow", fontsize=12,
                         ha="center", va="center", fontweight="bold",
@@ -316,23 +307,22 @@ if __name__ == "__main__":
     fig_cut.savefig(f"{out_dir}/02_ciecie.png", dpi=150, bbox_inches="tight")
     plt.close(fig_cut)
 
-    # KAFELKI
+
     fig_tiles, axes_tiles = plt.subplots(NUM_ROWS, NUM_COLS, figsize=(20, 10))
-    for i, wycinek in enumerate(wycinki):
+    for i, segment in enumerate(wycinki):
         if i >= NUM_ROWS * NUM_COLS:
             break
         ax = axes_tiles[i // NUM_COLS][i % NUM_COLS]
-        ax.imshow(wycinek, cmap="gray")
+        ax.imshow(segment, cmap="gray")
         ax.set_title(LEAD_NAMES_ORDERED[i], fontsize=12)
         ax.axis("off")
     fig_tiles.savefig(f"{out_dir}/03_kafelki.png", dpi=150, bbox_inches="tight")
     plt.close(fig_tiles)
 
-    # PORÓWNANIE — z diagnostyką amplitudy
     fig, axes = plt.subplots(NUM_ROWS, NUM_COLS, figsize=(22, 12))
     metrics = {}
 
-    for i, wycinek in enumerate(wycinki):
+    for i, segment in enumerate(wycinki):
         if i >= len(LEAD_NAMES_ORDERED):
             break
         lead_name = LEAD_NAMES_ORDERED[i]
@@ -340,12 +330,12 @@ if __name__ == "__main__":
         col = i % NUM_COLS
         ax = axes[row][col]
 
-        if row < len(linie_bazowe):
-            bl = linie_bazowe[row] - linie_ciecia[row]
+        if row < len(base_line):
+            bl = base_line[row] - cutting_line[row]
         else:
-            bl = wycinek.shape[0] // 2
+            bl = segment.shape[0] // 2
 
-        sig = digitize_crop(wycinek, bl)
+        sig = digitize_crop(segment, bl)
 
         start_idx = int(col * SEGMENT_DURATION_S * record.fs)
         end_idx = start_idx + int(SEGMENT_DURATION_S * record.fs)
@@ -353,10 +343,10 @@ if __name__ == "__main__":
         try:
             lead_idx = rec_leads_upper.index(lead_name.upper())
         except ValueError:
-            ax.set_title(f"{lead_name} — BRAK", color="red", fontsize=9)
+            ax.set_title(f"{lead_name} — Empty", color="red", fontsize=9)
             continue
         if end_idx > record.sig_len:
-            ax.set_title(f"{lead_name} — za krótki", color="red", fontsize=9)
+            ax.set_title(f"{lead_name} — to short", color="red", fontsize=9)
             continue
 
         gt = record.p_signal[start_idx:end_idx, lead_idx].copy()
@@ -395,7 +385,7 @@ if __name__ == "__main__":
                         fontsize=9, color=shift_color, fontweight='bold',
                         bbox=dict(facecolor='white', alpha=0.8, pad=2))
 
-        s = "✅" if corr_raw > 0.5 else "⚠️" if corr_raw > 0.2 else "❌"
+        s = "good" if corr_raw > 0.5 else "okayish" if corr_raw > 0.2 else "bad"
         ax.set_title(f"{lead_name} | r={corr_raw:.3f} amp={amp_ratio:.2f}x {s}", fontsize=8)
         ax.legend(fontsize=5)
         ax.grid(True, alpha=0.3)
@@ -405,7 +395,6 @@ if __name__ == "__main__":
     fig.savefig(f"{out_dir}/04_porownanie.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # TABELA Z AMPLITUDĄ
     print(f"\n{'='*85}")
     print(f"{'Lead':<8} {'MAE':>8} {'r_raw':>8} {'r_align':>8} {'Shift':>10} "
           f"{'GT_rng':>8} {'EX_rng':>8} {'AmpRat':>8}")
@@ -413,7 +402,7 @@ if __name__ == "__main__":
     for lead in LEAD_NAMES_ORDERED:
         if lead in metrics:
             m = metrics[lead]
-            s = "✅" if m["r_raw"] > 0.5 else "⚠️" if m["r_raw"] > 0.2 else "❌"
+            s = "good" if m["r_raw"] > 0.5 else "okayish" if m["r_raw"] > 0.2 else "bad"
             print(f"{lead:<8} {m['MAE']:>8.4f} {m['r_raw']:>8.4f} {m['r_aligned']:>8.4f} "
                   f"{m['shift']:>+5d} ({m['shift_ms']:>+6.0f}ms) "
                   f"{m['gt_range']:>8.3f} {m['ex_range']:>8.3f} {m['amp_ratio']:>7.2f}x {s}")
@@ -424,12 +413,12 @@ if __name__ == "__main__":
         avg_shift = np.mean([m["shift_ms"] for m in metrics.values()])
         avg_amp = np.mean([m["amp_ratio"] for m in metrics.values()])
         print(f"{'-'*85}")
-        print(f"{'ŚREDNIA':<8} {avg_mae:>8.4f} {avg_r:>8.4f} {avg_r_al:>8.4f} "
+        print(f"{'Avg':<8} {avg_mae:>8.4f} {avg_r:>8.4f} {avg_r_al:>8.4f} "
               f"      ({avg_shift:>+6.0f}ms) "
               f"{'':>8} {'':>8} {avg_amp:>7.2f}x")
 
         print(f"\n{'='*75}")
-        print("ANALIZA PRZESUNIĘCIA PER KOLUMNA:")
+        print("PER COLUMN OFFSET ANALYSIS:")
         print(f"{'='*75}")
         for col_idx in range(NUM_COLS):
             col_leads = [LEAD_NAMES_ORDERED[row * NUM_COLS + col_idx] for row in range(NUM_ROWS)]
@@ -438,11 +427,11 @@ if __name__ == "__main__":
                 leads_str = ", ".join(col_leads)
                 avg_s = np.mean(col_shifts)
                 std_s = np.std(col_shifts)
-                print(f"  Kol {col_idx+1} ({leads_str}): "
+                print(f"  col {col_idx+1} ({leads_str}): "
                       f"avg={avg_s:+.0f}ms  std={std_s:.0f}ms  "
-                      f"wartości: {[f'{s:+.0f}' for s in col_shifts]}")
+                      f"values: {[f'{s:+.0f}' for s in col_shifts]}")
 
     print(f"{'='*75}")
-    print(f"\nPliki w {out_dir}/:")
+    print(f"\nFile in {out_dir}/:")
     for f in sorted(os.listdir(out_dir)):
         print(f"  {f}")

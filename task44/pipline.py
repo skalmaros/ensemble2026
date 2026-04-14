@@ -8,9 +8,6 @@ import segmentation_models_pytorch as smp
 from scipy.signal import find_peaks, medfilt
 from scipy.interpolate import interp1d
 
-# ============================================================================
-# KONFIGURACJA
-# ============================================================================
 
 PAPER_WIDTH_MM = 279.4
 PAPER_HEIGHT_MM = 215.9
@@ -27,8 +24,8 @@ MASK_HEIGHT = 1700
 PIXELS_PER_MM_X = MASK_WIDTH / PAPER_WIDTH_MM
 PIXELS_PER_MM_Y = MASK_HEIGHT / PAPER_HEIGHT_MM
 
-SCIEZKA_MODEL = "unet_best.pth"
-TEST_DIR = "data/test_wyprostowane"
+MODEL_PATH = "unet_best.pth"
+TEST_DIR = "data/train_ready_files"
 OUTPUT_FILE = "submission.npz"
 BATCH_SIZE = 32
 
@@ -53,9 +50,6 @@ EXPECTED_LEADS = list(LEAD_NAME_SUBMISSION.values())
 COL_WIDTH_PX = int(SEGMENT_DURATION_S * PAPER_SPEED_MM_S * PIXELS_PER_MM_X)
 
 
-# ============================================================================
-# MODEL
-# ============================================================================
 
 def load_model(checkpoint_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -74,7 +68,7 @@ def generate_masks_batch(image_paths, model, device):
     for p in image_paths:
         img = cv2.imread(p)
         if img is None:
-            raise FileNotFoundError(f"Nie można wczytać: {p}")
+            raise FileNotFoundError(f"Could not load: {p}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (TRAIN_WIDTH, TRAIN_HEIGHT))
         tensors.append(img.transpose(2, 0, 1).astype(np.float32) / 255.0)
@@ -92,13 +86,10 @@ def generate_masks_batch(image_paths, model, device):
     return masks
 
 
-# ============================================================================
-# CIĘCIE MASKI
-# ============================================================================
 
-def find_left_margin(maska):
-    h, w = maska.shape
-    left_quarter = maska[:, :w // 4]
+def find_left_margin(mask):
+    h, w = mask.shape
+    left_quarter = mask[:, :w // 4]
     binary = left_quarter > 127
     col_counts = binary.sum(axis=0)
     has_signal = col_counts > 0
@@ -107,64 +98,59 @@ def find_left_margin(maska):
     return int(np.where(has_signal)[0][0])
 
 
-def split_mask(maska, num_rows=3, num_cols=4):
-    h, w = maska.shape
+def split_mask(mask, num_rows=3, num_cols=4):
+    h, w = mask.shape
 
-    profil_y = np.sum(maska > 127, axis=1)
+    profil_y = np.sum(mask > 127, axis=1)
     if profil_y.max() == 0:
-        # Pusta maska — zwróć puste wycinki
+
         empty = np.zeros((h // num_rows, COL_WIDTH_PX), dtype=np.uint8)
         baselines = [h // (2 * num_rows) + i * (h // num_rows) for i in range(num_rows)]
         cuts = [i * (h // num_rows) for i in range(num_rows + 1)]
         return [empty] * (num_rows * num_cols), baselines, cuts, COL_WIDTH_PX
 
-    piki, _ = find_peaks(profil_y, distance=h // 8,
+    file, _ = find_peaks(profil_y, distance=h // 8,
                          prominence=np.max(profil_y) * 0.05)
-    piki_sorted = sorted(piki)
+    file_sorted = sorted(file)
 
-    if len(piki_sorted) >= num_rows + 1:
-        linie_bazowe = list(piki_sorted[:num_rows])
-        dolna = (piki_sorted[num_rows - 1] + piki_sorted[num_rows]) // 2
-    elif len(piki_sorted) >= num_rows:
-        linie_bazowe = list(piki_sorted[:num_rows])
-        dolna = h
-    elif len(piki_sorted) == 2:
-        linie_bazowe = list(piki_sorted[:2])
-        # Estymuj trzecią baseline
-        gap = piki_sorted[1] - piki_sorted[0]
-        linie_bazowe.append(min(piki_sorted[1] + gap, h - 10))
-        dolna = h
-    elif len(piki_sorted) == 1:
-        # Jedna baseline — rozłóż równomiernie
+    if len(file_sorted) >= num_rows + 1:
+        base_line = list(file_sorted[:num_rows])
+        lower = (file_sorted[num_rows - 1] + file_sorted[num_rows]) // 2
+    elif len(file_sorted) >= num_rows:
+        base_line = list(file_sorted[:num_rows])
+        lower = h
+    elif len(file_sorted) == 2:
+        base_line = list(file_sorted[:2])
+        gap = file_sorted[1] - file_sorted[0]
+        base_line.append(min(file_sorted[1] + gap, h - 10))
+        lower = h
+    elif len(file_sorted) == 1:
         step = h // (num_rows + 1)
-        linie_bazowe = [step * (i + 1) for i in range(num_rows)]
-        dolna = h
+        base_line = [step * (i + 1) for i in range(num_rows)]
+        lower = h
     else:
         step = h // (num_rows + 1)
-        linie_bazowe = [step * (i + 1) for i in range(num_rows)]
-        dolna = h
+        base_line = [step * (i + 1) for i in range(num_rows)]
+        lower = h
 
-    linie_ciecia_y = [0]
-    for i in range(len(linie_bazowe) - 1):
-        linie_ciecia_y.append((linie_bazowe[i] + linie_bazowe[i + 1]) // 2)
-    linie_ciecia_y.append(dolna)
+    cutting_line_y = [0]
+    for i in range(len(base_line) - 1):
+        cutting_line_y.append((base_line[i] + base_line[i + 1]) // 2)
+    cutting_line_y.append(lower)
 
-    margin_left = find_left_margin(maska)
+    margin_left = find_left_margin(mask)
 
-    wycinki = []
-    for row in range(len(linie_ciecia_y) - 1):
+    segments = []
+    for row in range(len(cutting_line_y) - 1):
         for col in range(num_cols):
             x0 = margin_left + col * COL_WIDTH_PX
             x1 = min(x0 + COL_WIDTH_PX, w)
-            wycinki.append(maska[linie_ciecia_y[row]:linie_ciecia_y[row + 1],
+            segments.append(mask[cutting_line_y[row]:cutting_line_y[row + 1],
                                  x0:x1])
 
-    return wycinki, linie_bazowe, linie_ciecia_y, COL_WIDTH_PX
+    return segments, base_line, cutting_line_y, COL_WIDTH_PX
 
 
-# ============================================================================
-# DIGITALIZACJA — CENTROID
-# ============================================================================
 
 def digitize_crop(crop, baseline_row):
     h, w = crop.shape
@@ -211,20 +197,16 @@ def digitize_crop(crop, baseline_row):
     return interp1d(old_x, voltage, kind="linear")(new_x).astype(np.float32)
 
 
-# ============================================================================
-# WALIDACJA
-# ============================================================================
-
 def validate_submission(npz_path, expected_records):
     print(f"\n{'='*60}")
-    print("WALIDACJA SUBMISSION")
+    print("VALIDATE  SUBMISSION")
     print(f"{'='*60}")
 
     data = np.load(npz_path)
     keys = list(data.keys())
     total_expected = len(expected_records) * len(EXPECTED_LEADS)
 
-    print(f"Kluczy: {len(keys)} (oczekiwano {total_expected})")
+    print(f"KEY: {len(keys)} (EXPECTED {total_expected})")
 
     errors = []
     for key in keys:
@@ -234,29 +216,26 @@ def validate_submission(npz_path, expected_records):
         if arr.ndim != 1 or len(arr) == 0:
             errors.append(f"{key}: shape={arr.shape}")
 
-    print(f"\nPrzykłady:")
+    print(f"\nExample:")
     for key in sorted(keys)[:5]:
         arr = data[key]
         print(f"  {key}: {arr.shape} {arr.dtype} [{arr.min():.3f}, {arr.max():.3f}]")
 
     lengths = [len(data[k]) for k in keys]
-    print(f"\nDługości: {min(lengths)}-{max(lengths)} próbek "
+    print(f"\nLenght: {min(lengths)}-{max(lengths)} samples "
           f"({min(lengths)/TARGET_FS:.2f}-{max(lengths)/TARGET_FS:.2f}s)")
 
     if errors:
-        print(f"\n❌ BŁĘDY ({len(errors)}):")
+        print(f"\nErrors ({len(errors)}):")
         for e in errors[:15]:
             print(f"  {e}")
     else:
-        print(f"\n✅ WALIDACJA OK!")
+        print(f"\nSucess validation")
 
     print(f"{'='*60}")
     data.close()
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
 
 if __name__ == "__main__":
     t_start = time.time()
@@ -264,18 +243,18 @@ if __name__ == "__main__":
     print("ECG SUBMISSION PIPELINE")
     print("=" * 50)
 
-    model = load_model(SCIEZKA_MODEL)
+    model = load_model(MODEL_PATH)
     device = next(model.parameters()).device
-    print(f"Urządzenie: {device}")
+    print(f"DEVICE: {device}")
 
     patterns = [os.path.join(TEST_DIR, f"*.{e}") for e in ("png", "jpg", "jpeg")]
     image_paths = sorted(p for pat in patterns for p in glob.glob(pat))
     n = len(image_paths)
     record_names = [os.path.splitext(os.path.basename(p))[0] for p in image_paths]
-    print(f"Obrazów: {n}")
+    print(f"Imagines: {n}")
 
     if not image_paths:
-        raise FileNotFoundError(f"Brak obrazów w {TEST_DIR}")
+        raise FileNotFoundError(f"No images in {TEST_DIR}")
 
     submission = {}
     errors = []
@@ -293,21 +272,21 @@ if __name__ == "__main__":
 
         for mask, rec_name in zip(masks, batch_names):
             try:
-                wycinki, linie_bazowe, linie_ciecia, col_width_px = split_mask(
+                segments, base_line, cutting_line, col_width_px = split_mask(
                     mask, num_rows=NUM_ROWS, num_cols=NUM_COLS
                 )
 
-                for i, wycinek in enumerate(wycinki):
+                for i, segment in enumerate(segments):
                     if i >= len(LEAD_NAMES_ORDERED):
                         break
 
                     row = i // NUM_COLS
-                    if row < len(linie_bazowe):
-                        bl = linie_bazowe[row] - linie_ciecia[row]
+                    if row < len(base_line):
+                        bl = base_line[row] - cutting_line[row]
                     else:
-                        bl = wycinek.shape[0] // 2
+                        bl = segment.shape[0] // 2
 
-                    sig = digitize_crop(wycinek, bl)
+                    sig = digitize_crop(segment, bl)
 
                     lead_sub = LEAD_NAME_SUBMISSION[LEAD_NAMES_ORDERED[i]]
                     key = f"{rec_name}_{lead_sub}"
@@ -323,16 +302,16 @@ if __name__ == "__main__":
         eta = (n - done) / rate if rate > 0 else 0
         print(f"  [{done}/{n}] {rate:.1f} img/s | ETA: {eta:.0f}s")
 
-    print(f"\nZapisywanie {len(submission)} kluczy...")
+    print(f"\nSaving {len(submission)} keys...")
     np.savez_compressed(OUTPUT_FILE, **submission)
 
     size_mb = os.path.getsize(OUTPUT_FILE) / (1024 * 1024)
     total = time.time() - t_start
-    print(f"\nKluczy:  {len(submission)}")
-    print(f"Plik:    {OUTPUT_FILE} ({size_mb:.1f} MB)")
-    print(f"Czas:    {total:.0f}s ({total/60:.1f} min)")
+    print(f"\nKKeys:  {len(submission)}")
+    print(f"Files:    {OUTPUT_FILE} ({size_mb:.1f} MB)")
+    print(f"Time:    {total:.0f}s ({total/60:.1f} min)")
     if errors:
-        print(f"Błędy:   {len(errors)}")
+        print(f"Error:   {len(errors)}")
         for name, err in errors[:10]:
             print(f"  {name}: {err}")
 

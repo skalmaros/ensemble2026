@@ -5,7 +5,6 @@ import requests
 from dotenv import load_dotenv
 
 
-# Load .env file if present
 load_dotenv()
 
 ENDPOINT = "task-status"

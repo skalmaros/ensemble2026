@@ -11,11 +11,8 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Urządzenie: {device}")
+print(f"Divice: {device}")
 
-# ============================================================================
-# KONFIGURACJA
-# ============================================================================
 
 TARGET_WIDTH = 1024
 TARGET_HEIGHT = 768
@@ -23,17 +20,14 @@ BATCH_SIZE = 8
 EPOCHS = 75
 LR = 1e-4
 VAL_SPLIT = 0.1
-IMAGES_DIR = "data/train_wyprostowane"
-MASKS_DIR = "data/train_maski"
+IMAGES_DIR = "data/train_ready_files"
+MASKS_DIR = "data/train_masks"
 TIMEOUT_SECONDS = 14 * 60
 CHECKPOINT_DIR = "checkpoints"
-RESUME_FROM = "checkpoints/ostatni.pth"
+RESUME_FROM = "checkpoints/last.pth"
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-# ============================================================================
-# AUGMENTACJA — silniejsza
-# ============================================================================
 
 train_transform = A.Compose([
     A.Resize(TARGET_HEIGHT, TARGET_WIDTH),
@@ -57,9 +51,6 @@ val_transform = A.Compose([
 ])
 
 
-# ============================================================================
-# DATASET
-# ============================================================================
 
 class ECGDataset(Dataset):
     def __init__(self, images_dir, masks_dir, file_list=None, transform=None):
@@ -85,9 +76,9 @@ class ECGDataset(Dataset):
         mask = cv2.imread(os.path.join(self.masks_dir, mask_name), cv2.IMREAD_GRAYSCALE)
 
         if image is None:
-            raise ValueError(f"Brak zdjęcia: {img_name}")
+            raise ValueError(f"No image: {img_name}")
         if mask is None:
-            raise ValueError(f"Brak maski: {mask_name}")
+            raise ValueError(f"No mask: {mask_name}")
 
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = (mask > 127).astype(np.uint8)
@@ -104,9 +95,7 @@ class ECGDataset(Dataset):
             return image, mask
 
 
-# ============================================================================
-# PODZIAŁ TRAIN/VAL — TEN SAM SEED
-# ============================================================================
+
 
 all_files = sorted([
     f for f in os.listdir(IMAGES_DIR)
@@ -138,10 +127,6 @@ val_loader = DataLoader(
 )
 
 
-# ============================================================================
-# MODEL
-# ============================================================================
-
 model = smp.Unet(
     encoder_name="resnet34",
     encoder_weights=None,
@@ -149,10 +134,6 @@ model = smp.Unet(
     classes=1,
 ).to(device)
 
-
-# ============================================================================
-# LOSS: BCE + Dice + Focal
-# ============================================================================
 
 class CombinedLoss(nn.Module):
     def __init__(self):
@@ -182,26 +163,19 @@ optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
 
-# ============================================================================
-# WZNOWIENIE Z CHECKPOINTU
-# ============================================================================
 
 start_epoch = 0
 
 if RESUME_FROM and os.path.exists(RESUME_FROM):
-    print(f"Wznawiam z: {RESUME_FROM}")
+    print(f"Resume from: {RESUME_FROM}")
     checkpoint = torch.load(RESUME_FROM, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model'])
-    # Nowy optimizer i scheduler — nie ładuj starych (nowy LR)
     start_epoch = checkpoint['epoch']
-    print(f"Wznowiono od epoki {start_epoch + 1}, nowy LR={LR}")
+    print(f"Resume form {start_epoch + 1}, new LR={LR}")
 elif RESUME_FROM:
-    print(f"UWAGA: {RESUME_FROM} nie istnieje, zaczynam od zera")
+    print(f"{RESUME_FROM} doesn't exist, I'm starting from beggining.")
 
 
-# ============================================================================
-# METRYKI
-# ============================================================================
 
 def compute_metrics(pred, target, threshold=0.5):
     pred_bin = (torch.sigmoid(pred) > threshold).float()
@@ -214,10 +188,6 @@ def compute_metrics(pred, target, threshold=0.5):
     return iou, dice
 
 
-# ============================================================================
-# ZAPIS CHECKPOINTU
-# ============================================================================
-
 def save_checkpoint(epoch, model, optimizer, scheduler, val_dice, is_best=False):
     state = {
         'epoch': epoch,
@@ -227,17 +197,14 @@ def save_checkpoint(epoch, model, optimizer, scheduler, val_dice, is_best=False)
         'val_dice': val_dice,
     }
 
-    torch.save(state, os.path.join(CHECKPOINT_DIR, "ostatni.pth"))
+    torch.save(state, os.path.join(CHECKPOINT_DIR, "last.pth"))
 
     if is_best:
         torch.save(state, os.path.join(CHECKPOINT_DIR, "best.pth"))
         torch.save(model.state_dict(), "unet_best.pth")
-        print(f"  >>> Nowy najlepszy! Val Dice: {val_dice:.4f}", flush=True)
+        print(f"  >>> New best Val Dice: {val_dice:.4f}", flush=True)
 
 
-# ============================================================================
-# TRENING Z TIMEOUTEM
-# ============================================================================
 
 def train_model(model, train_loader, val_loader, epochs, start_epoch=0):
     best_val_dice = 0.0
@@ -247,7 +214,6 @@ def train_model(model, train_loader, val_loader, epochs, start_epoch=0):
         elapsed = time.time() - t_start
         t_epoch = time.time()
 
-        # ---- TRAIN ----
         model.train()
         train_loss = 0.0
         train_dice = 0.0
@@ -272,7 +238,6 @@ def train_model(model, train_loader, val_loader, epochs, start_epoch=0):
         train_loss /= n_tb
         train_dice /= n_tb
 
-        # ---- VALIDATION ----
         model.eval()
         val_loss = 0.0
         val_dice = 0.0
@@ -298,12 +263,12 @@ def train_model(model, train_loader, val_loader, epochs, start_epoch=0):
         lr_now = optimizer.param_groups[0]['lr']
 
         print(
-            f"Epoka {epoch+1:2d}/{epochs} | "
+            f"Epoch {epoch+1:2d}/{epochs} | "
             f"{epoch_time:.0f}s | "
             f"LR: {lr_now:.6f} | "
             f"Train L:{train_loss:.4f} D:{train_dice:.4f} | "
             f"Val L:{val_loss:.4f} D:{val_dice:.4f} | "
-            f"Zostało: {remaining:.0f}s",
+            f"Remaining: {remaining:.0f}s",
             flush=True
         )
 
@@ -312,17 +277,14 @@ def train_model(model, train_loader, val_loader, epochs, start_epoch=0):
             best_val_dice = val_dice
         save_checkpoint(epoch + 1, model, optimizer, scheduler, val_dice, is_best)
 
-    print(f"\nNajlepszy Val Dice: {best_val_dice:.4f}")
+    print(f"\nThe best Val Dice: {best_val_dice:.4f}")
 
 
-# ============================================================================
-# START
-# ============================================================================
 
-print(f"\nKonfiguracja:")
-print(f"  Rozmiar: {TARGET_WIDTH}x{TARGET_HEIGHT}")
+print(f"\nConfiguration:")
+print(f"  Size: {TARGET_WIDTH}x{TARGET_HEIGHT}")
 print(f"  Batch: {BATCH_SIZE}")
-print(f"  Epoki: {start_epoch+1}..{EPOCHS}")
+print(f"  Epoch: {start_epoch+1}..{EPOCHS}")
 print(f"  LR: {LR} -> 1e-6 (cosine)")
 print(f"  Loss: BCE(0.3) + Dice(0.4) + Focal(0.3)")
 print(f"  Timeout: {TIMEOUT_SECONDS}s")
